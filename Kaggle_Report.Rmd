@@ -1,0 +1,164 @@
+---
+title: "Kaggle Report: Airbnb Price Prediction"
+author: "Yirou Ge"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = F)
+```
+## Executive Summary
+This report aims to analyze and predict the price for an Airbnb rental based on 96 variables regarding its property, host, and past reviews. Methods of analysis include both exploratory data analysis, predictive modeling, and machine learning. The report illustrates the detailed process of data cleaning and imputation, variable selection, and model building.  
+Eventually, a machine learning method - XGBoost algorithm - was employed to execute the prediction using 63 variables. All codes used in this project can be found in the appendices.  
+Results of the XGBoost model show that the price of an Airbnb rental is primarily influenced by the property's location, amenities, host service, and review scores.  
+
+## Exploratory Data Analysis
+In order to understand the relationship between a rental's price and its 95 variables in the dataset, a descriptive analysis was carried out and the variables were classified into four main categories:  
+1. Host Information: including host response rate, host listings count,host verification etc.  
+2. Property Information: including location, type, amenities etc.  
+3. Previous Reviews: including number of reviews, review scores etc.  
+4. Redundant Data: including listing url, name, notes, weekly price etc.  
+It is clear that the influencial variables mainly consist of three parts: host, property information, and previous reviews. Subsequently, 19 representative variables were selected from those three categories of data to examine their correlation, which was visualized as follows.
+```{r process data, eval=TRUE,include=FALSE}
+library(readr)
+test <- read_csv("test.csv")
+```
+```{r exploratory data analysis,eval=TRUE,echo=FALSE}
+library(corrplot)
+corrplot(cor(test[,-3]),method = 'square',type = 'lower',diag = F, tl.cex = 0.5, tl.col = "black", win.asp = 0.5)
+```
+
+Based on the plot above, it can be concluded that the variables within the same category are positively and highly correlated, while variables from different categories have low correlations between them. Such a result indicates that the predictors within the same category should be carefully chosen and interpreted during the model building process.  
+  
+## Data Pre-processing  
+*The following data processing codes were executed on both the dataset used for analysis and the dataset for prediction. However, the latter has been omitted due to the limited length of the report. Full codes can be found in the appendices.*  
+
+According to the exploratory analysis, there are 48 valuable variables in this dataset that could impact a property's rental price. This report starts with the processing of numeric or factor variables, and then continues with the transformation of string and date variables.
+
+### Numeric/Factor Variables Extraction and Data Cleaning
+44 numeric and factor variables were extracted from the original dataset to form a new dataset airbnb (*the full list of variable names can be found in the appendices*).   
+First, all the rows that contain a negative or 0 value in their "price" column was eliminated from the dataset. Then, host response time and rate was transformed from factor variables into numeric variables to reduce the complexity of the prediction model. Finally, the variable of property type was simplified by transforming the values that are not common among the analysis and prediction dataset and have less than 20 entries into "Other". In conclusion, such a process eliminated redundant information and prepared data for further analysis and model building.
+```{r extract & clean numeric/factor variables}
+airbnb <- analysisData[ , variables]
+
+airbnb <- airbnb[airbnb$price>0, ]
+airbnb$host_response_time <- as.numeric(factor(airbnb$host_response_time))
+airbnb$host_response_rate <- as.numeric(sub("%", "",airbnb$host_response_rate,fixed=TRUE))/100
+
+airclean = airbnb
+property_clean <- unique(airclean$property_type)[
+  (unique(airclean$property_type) %in% unique(scoring$property_type))]
+table(airclean$property_type) <20
+property_null <- c("Bungalow","Cave","Dorm","Earth house","Hotel","Resort",
+                   "Tiny house","Vacation home","Villa")
+airclean$property_type[airclean$property_type %in% property_clean == FALSE] <- "Other"
+airclean$property_type[airclean$property_type %in% property_null] <- "Other"
+```
+### Missing Values Imputation and Outliers Detection
+Missing values inside the dataset were imputed by the median value of the variables that they belong to, which enables the dataset to retain other useful information in the same row and reduce the possible prediction errors.  
+Afterwards, boxplot function was used to detect outliers in numeric variables and the results showed that there are multiple outliers in columns like extra people, minimum nights etc. However, after analyzing those outliers carefully, it can be concluded that those outliers are reseaonable and therefore should not be deleted or imputed. For example, the number of 365 was regarded as an outlier in the "minimum nights" column, but that value belongs to an entire apartment which requires a shortest lease of one year.
+```{r impute missing values}
+library(caret)
+airclean = predict(preProcess(airbnb, method = 'medianImpute'), newdata = airclean)
+lapply(airclean[,c(4,14:17,20:25)], boxplot)
+```
+### String Variable Transformation: Amenities
+Since amenities are regarded as an important feature of a property for tenants and the original variable consists of redudant string values that are difficult to calculate, the variable was splitted and then transformed into multiple new columns containing 0/1 values.  
+More specifically, the string values of the original amenities variable was first splitted into different elements like TV and Internet. Then, a list of unique elements that exist in both the analysis and prediction dataset was created and sorted alphabetically. Finally, the element that has more than 1000 entries was transformed into a new variable which indicates whether the property contains such amenities or not. The element of toilet was also transformed due to its importance, although it only has 571 entries.
+```{r convert string variable:amenities}
+analy <- analysisData[analysisData$price>0, ]
+library(stringr)
+out <- strsplit(as.character(analy$amenities), ',')
+ame <- sort(unique(unlist(out)))
+for(i in 1:length(ame)) {
+  name = str_replace_all(noquote(ame[i])," ","_")
+  airclean[, name] <- 0
+  num = i+44
+  airclean[str_detect(analy$amenities,ame[i]), num] <- 1
+}
+
+for (i in 1:length(ame)) {
+  name = str_replace_all(noquote(ame[i])," ","_")
+  if (sum(airclean[,name]) < 1000) {
+    if(name != "_toilet") {
+      airclean[,name] <- NULL
+    }
+  }
+}
+```
+### Convert Date Variables
+Three date variables was transformed into numeric variables and added into the dataset including "host_since","first_review", and "last_review". Instead of using the date when the review was made or the host started, the new variables document the difference of days between the orginal and the current date.
+```{r}
+library(lubridate)
+date <- mdy('12/02/2018')
+library(dplyr)
+airclean <- mutate(airclean, host_days = as.numeric(difftime(date,analy$host_since)))
+airclean <- mutate(airclean, first_review = as.numeric(difftime(date,analy$first_review)))
+airclean <- mutate(airclean, last_review = as.numeric(difftime(date,analy$last_review)))
+```
+## Variable Selection
+After executing the data processing methods above, the dataset contained 166 variables and it was essential to choose the best combination of variables to form the model. Therefore, a lasso regression was employed to select approriate variables in the first place. After combining the results of lasso regression and exploratory analysis, a new list *v* of 45 variables was produced which includes "host_response_time","host_is_superhost", and "neighbourhood_group_cleansed" (*the full list of variable names can be found in the appendices*). 
+```{r lasso regression}
+library(glmnet)
+x = model.matrix(price~.-1, data = airclean)
+y = airclean$price
+cv.lasso = cv.glmnet(x,y,alpha=1)
+coef(cv.lasso)
+airxgb = airclean[,v]
+```
+## XGBoost Model
+In order to construct an accurate and effective prediction model, multiple models was formed and tested based on the new dataset which include linear regression model, logistic model, bags, random forest, and boost model.  
+After experiencing an abundant number of testings, the first three models showed that they were unable to further improve the prediction's accuracy once the rmse was reduced to around 65. Besides, the random forest model's time-consuming nature largely decreased the model's efficiency and therefore was discarded as well.  
+The construction of a boost model largely increased the prediction result's accuracy and successfully reduced the rmse of model to around 53. However, it soon faced the same obstacle of failing to further improve its performace and even encountered some over-fitting problems.  
+Accordingly, an advanced and superior boost model was explored-- XGBoost Model. XGBoost Algorithm is a machine learning method which could train the model in a more effective way and process data more efficiently. Eventually, the implication of the XGBoost model successfully reduced the rmse to 51.30 and therefore was chosen for this project.  
+
+### Prepare Data
+Since the nature of the XGBoost Algorithm requires that all the variables should be numeric, all logical variables was transformed into numeric variables containing 0/1 values. In addition, the values in character variables like property type was transformed into new two-level variables and combined into the original dataset. Afterwards, the dataset was further converted into a matrix form for further model building process.
+```{r xgboost model: prepare data}
+airxgb$host_is_superhost <- as.numeric(factor(airxgb$host_is_superhost))
+airxgb$is_business_travel_ready <- as.numeric(factor(airxgb$is_business_travel_ready))
+
+region <- model.matrix(~neighbourhood_group_cleansed-1, airxgb)
+property <- model.matrix(~property_type-1, airxgb)
+room <- model.matrix(~room_type-1, airxgb)
+airxgb <- cbind(airxgb, region, property, room)
+airxgb$neighbourhood_group_cleansed <- NULL; airxgb$price <- NULL
+airxgb$property_type <- NULL; airxgb$room_type <- NULL
+airxgb_ready <- data.matrix(airxgb)
+```
+### Model Building
+For a XGBoost algorithm, its parameters exert great impacts on the model's performance. Therefore, the following codes have been executed for multiple times in an attempt to find the most appropriate parameters for the model. Eventually, it was proved that the list of parameters as follows has a relatively greater contribution to the accuracy of the model's prediction results.
+```{r xgboost model building}
+library(xgboost)
+params <- list(
+  eta = 0.01,
+  max_depth = 6,
+  subsample = 0.8,
+  min_child_weight = 7,
+  colsample_bytree = 1
+)
+
+modelxgb <- xgboost(
+  params = params,
+  data = airxgb_ready,
+  label = airclean$price,
+  nrounds = 4000,
+  objective = "reg:linear"
+)
+```
+## Model Results Analysis
+The final model is based on the XGBoost Algorithm and contains 63 variables in totall, which consist of three parts: property information, host information, and previous reviews.  
+In order to examine the influence of each predictor in a more specific and accurate way, xgb.plot.importance() method was employed to generate the following bar-chart which represents the importance of each feature in this dataset.  
+Based on the bar-chart below, there are several findings that can be interpreted from the model results as follows.  
+1. Room type (Entire home/Apartment) stands out as the most important predictor of rental price, dominating the other features. Such a result is predictable since an entire apartment/home normally is equipped with more amenities, requires a longer lease, and thus has a higher rental price.
+2. The number of bathrooms and cleaning fees rank within the top 3 influential predictors of rental price. Since bathrooms can be regarded as one of the most necessary infrastructures of a property, it is logical that the number of bathrooms may be positively related to the property's price.
+3. The property's longitude and latitude function as the forth and seventh important predictor, which indicates the exact location (e.g.uptown or down) of the property and thus exert a great influence on its price.
+
+In conlcusion, the XGBoost model that was built in this projects provides valuable information regarding the predictors of a rental's price. More specifically, room type, bathrooms, cleaning fees, longitude, and accommodates function as the top 5 important features and should be attached with great importance in Airbnb.
+```{r model results analysis}
+importance_matrix <- xgb.importance(model = modelxgb)
+importance_matrix
+xgb.plot.importance(importance_matrix = importance_matrix)
+```

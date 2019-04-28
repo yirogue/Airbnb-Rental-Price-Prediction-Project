@@ -1,0 +1,193 @@
+---
+title: "Appendix"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = F)
+```
+## Import Data
+```{r import data}
+library(readr)
+analysisData <- read_csv("analysisData.csv")
+scoringData <- read_csv("scoringData.csv")
+```
+## Extract Numeric/Factor variables
+```{r extract numeric/factor variables}
+variables <- c("host_response_time","host_response_rate","host_is_superhost",
+"host_listings_count","host_has_profile_pic","host_identity_verified",
+"neighbourhood_group_cleansed","zipcode","latitude","longitude",
+"is_location_exact","property_type","room_type","accommodates","bathrooms",
+"bedrooms","beds","bed_type","price","security_deposit","cleaning_fee",
+"guests_included","extra_people","minimum_nights","maximum_nights",
+"availability_30","availability_60","availability_90","availability_365",
+"number_of_reviews","review_scores_rating","review_scores_accuracy",
+"review_scores_cleanliness","review_scores_checkin","review_scores_communication",
+"review_scores_location","review_scores_value","instant_bookable",
+"is_business_travel_ready","cancellation_policy","require_guest_profile_picture",
+"require_guest_phone_verification","calculated_host_listings_count","reviews_per_month")
+airbnb <- analysisData[ , variables]
+scoring <- scoringData[ , variables[variables != "price"]]
+```
+## Clean Data
+```{r clean data}
+airbnb <- airbnb[airbnb$price>0, ]
+airbnb$host_response_rate[airbnb$host_response_rate == "N/A"] <- NA
+airbnb$host_response_time[airbnb$host_response_time == "N/A"] <- NA
+airbnb$host_response_time <- as.numeric(factor(airbnb$host_response_time))
+airbnb$host_response_rate <- as.numeric(sub("%", "",airbnb$host_response_rate,fixed=TRUE))/100
+airclean = airbnb
+
+property_clean <- unique(airclean$property_type)[
+  (unique(airclean$property_type) %in% unique(scoring$property_type))]
+table(airclean$property_type) <20
+property_null <- c("Bungalow","Cave","Dorm","Earth house","Hotel","Resort",
+                   "Tiny house","Vacation home","Villa")
+airclean$property_type[airclean$property_type %in% property_clean == FALSE] <- "Other"
+airclean$property_type[airclean$property_type %in% property_null] <- "Other"
+
+scoring$host_response_rate[scoring$host_response_rate == "N/A"] <- NA
+scoring$host_response_time[scoring$host_response_time == "N/A"] <- NA
+scoring$host_response_time <- as.numeric(factor(scoring$host_response_time))
+scoring$host_response_rate <- as.numeric(sub("%", "",scoring$host_response_rate,fixed=TRUE))/100
+scorclean = scoring
+
+scorclean$property_type[scorclean$property_type %in% property_clean == FALSE] <- "Other"
+scorclean$property_type[scorclean$property_type %in% property_null] <- "Other"
+```
+## Impute Missing Values and Outliers
+```{r impute missing values}
+library(caret)
+airclean = predict(preProcess(airbnb, method = 'medianImpute'), newdata = airclean)
+scorclean = predict(preProcess(scoring, method = 'medianImpute'), newdata = scorclean)
+lapply(airclean[,c(4,14:17,20:25)], boxplot)
+```
+## Convert String Variable:Amenities
+```{r convert string variable:amenities}
+analy <- analysisData[analysisData$price>0, ]
+analy$amenities <- gsub("\\{","", analy$amenities)
+analy$amenities <- gsub("\\}","", analy$amenities)
+analy$amenities <- gsub("\"","", analy$amenities)
+library(stringr)
+out <- strsplit(as.character(analy$amenities), ',')
+ame <- sort(unique(unlist(out)))
+for(i in 1:length(ame)) {
+  name = str_replace_all(noquote(ame[i])," ","_")
+  airclean[, name] <- 0
+  num = i+44
+  airclean[str_detect(analy$amenities,ame[i]), num] <- 1
+}
+
+for(i in 1:length(ame)) {
+  name = str_replace_all(noquote(ame[i])," ","_")
+  scorclean[, name] <- 0
+  num = i+43
+  scorclean[str_detect(scoringData$amenities,ame[i]), num] <- 1
+}
+
+noname = c()
+for (i in 1:length(ame)) {
+  name = str_replace_all(noquote(ame[i])," ","_")
+  if (sum(airclean[,name]) < 1000) {
+    if(name != "_toilet") {
+      airclean[,name] <- NULL
+      noname = c(noname,name)
+    }
+  }
+}
+scorclean[,noname] <- NULL
+```
+## Convert Date Variables
+```{r}
+library(lubridate)
+date <- mdy('12/02/2018')
+library(dplyr)
+airclean <- mutate(airclean, host_days = as.numeric(difftime(date,analy$host_since)))
+airclean <- mutate(airclean, first_review = as.numeric(difftime(date,analy$first_review)))
+airclean <- mutate(airclean, last_review = as.numeric(difftime(date,analy$last_review)))
+
+scorclean <- mutate(scorclean, host_days = as.numeric(difftime(date,scoringData$host_since)))
+scorclean <- mutate(scorclean, first_review = as.numeric(difftime(date,scoringData$first_review)))
+scorclean <- mutate(scorclean, last_review = as.numeric(difftime(date,scoringData$last_review)))
+```
+## Variable Selection
+```{r lasso regression}
+library(glmnet)
+x = model.matrix(price~.-1, data = airclean)
+y = airclean$price
+cv.lasso = cv.glmnet(x,y,alpha=1)
+coef(cv.lasso)
+```
+## XGBoost Model: Prepare Data
+```{r xgboost model: prepare data}
+v <- c("host_response_time","host_is_superhost","neighbourhood_group_cleansed",
+"latitude","longitude","property_type","room_type","accommodates",
+"bathrooms","bedrooms","price","security_deposit","cleaning_fee",
+"guests_included","extra_people","minimum_nights","availability_30",
+"availability_90","availability_365","number_of_reviews","review_scores_rating",
+"review_scores_cleanliness","review_scores_location","review_scores_value",
+"is_business_travel_ready","reviews_per_month","Air_conditioning","Bed_linens",
+"Cable_TV","Dishwasher","Doorman","Dryer","Elevator","Free_parking_on_premises",
+"Free_street_parking","Gym","Indoor_fireplace","Keypad","Microwave","Safety_card",
+"Shampoo","translation_missing:_en.hosting_amenity_49","TV",
+"Well-lit_path_to_entrance","Wheelchair_accessible","last_review")
+
+airxgb = airclean[,v]
+scorxgb = scorclean[,v[v != "price"]]
+
+airxgb$host_is_superhost <- as.numeric(factor(airxgb$host_is_superhost))
+airxgb$is_business_travel_ready <- as.numeric(factor(airxgb$is_business_travel_ready))
+
+scorxgb$host_is_superhost <- as.numeric(factor(scorxgb$host_is_superhost))
+scorxgb$is_business_travel_ready <- as.numeric(factor(scorxgb$is_business_travel_ready))
+
+region <- model.matrix(~neighbourhood_group_cleansed-1, airxgb)
+property <- model.matrix(~property_type-1, airxgb)
+room <- model.matrix(~room_type-1, airxgb)
+airxgb <- cbind(airxgb, region, property, room)
+airxgb$neighbourhood_group_cleansed <- NULL
+airxgb$property_type <- NULL
+airxgb$room_type <- NULL
+airxgb$price <- NULL
+airxgb_ready <- data.matrix(airxgb)
+
+region1 <- model.matrix(~neighbourhood_group_cleansed-1, scorxgb)
+property1 <- model.matrix(~property_type-1, scorxgb)
+room1 <- model.matrix(~room_type-1, scorxgb)
+scorxgb <- cbind(scorxgb, region1, property1, room1)
+scorxgb$neighbourhood_group_cleansed <- NULL
+scorxgb$property_type <- NULL
+scorxgb$room_type <- NULL
+scorxgb_ready <- data.matrix(scorxgb)
+```
+## XGBoost Model Building
+```{r xgboost model building}
+library(xgboost)
+params <- list(
+  eta = 0.01,
+  max_depth = 6,
+  subsample = 0.8,
+  min_child_weight = 7,
+  colsample_bytree = 1
+)
+
+modelxgb <- xgboost(
+  params = params,
+  data = airxgb_ready,
+  label = airclean$price,
+  nrounds = 4000,
+  objective = "reg:linear"
+)
+
+predxgb = predict(modelxgb, scorxgb_ready)
+submissionFilexgb = data.frame(id = scoringData$id, price = predxgb)
+write.csv(submissionFilexgb, 'Submission.csv', row.names = F)
+```
+## Model Results Analysis
+```{r model results analysis}
+importance_matrix <- xgb.importance(model = modelxgb)
+print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix, top_n = 15)
+```
